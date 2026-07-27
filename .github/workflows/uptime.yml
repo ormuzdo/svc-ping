@@ -1,0 +1,55 @@
+name: uptime
+
+# Зовнішня перевірка доступності сервісу.
+# Адреса — у секреті PING_URL: у відкритих файлах її нема, і GitHub маскує її в логах.
+# Пінг кожні ~5 хв; на збій (з одним ретраєм проти флапу) — повідомлення в Telegram.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_url:
+        description: 'Тестова адреса для перевірки алерту. Порожньо = звичайний пінг.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping and alert on failure
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_SUPPORT_CHAT: ${{ secrets.TG_SUPPORT_CHAT }}
+          PING_URL: ${{ secrets.PING_URL }}
+          FORCE_URL: ${{ github.event.inputs.force_url }}
+        run: |
+          URL="${FORCE_URL:-}"
+          TEST=""
+          if [ -n "$URL" ]; then
+            TEST="🧪 ТЕСТ моніторингу (ігноруйте) — "
+          else
+            URL="$PING_URL"
+          fi
+          if [ -z "$URL" ]; then echo "PING_URL не заданий у секретах репо"; exit 1; fi
+          check() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$URL" || echo 000; }
+          code=$(check)
+          if [ "$code" != "200" ]; then sleep 20; code=$(check); fi   # ретрай проти транзієнтного флапу
+          if [ "$code" != "200" ]; then
+            msg="${TEST}🔴 Сервіс недоступний: ${URL} → HTTP ${code} ($(date -u '+%F %H:%M UTC'))"
+            curl -s -m 15 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_SUPPORT_CHAT}" \
+              --data-urlencode "text=${msg}" >/dev/null
+            echo "ALERT sent (HTTP $code)"
+            [ -n "$TEST" ] || exit 1
+          else
+            echo "OK: HTTP 200"
+          fi
